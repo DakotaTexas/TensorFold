@@ -379,6 +379,29 @@ class FlashNextEngine:
             self.scheduler.close()
             self.scheduler = None
 
+    def score_labels(self, prompt_ids: list[int], label_ids: list[int]) -> tuple[list[float], float]:
+        """``/v1/decisions``: the labels' log probabilities at the answer position, and 0 as their logsumexp.
+
+        One greedy target step reads the raw row the ``logprobs`` collector reads (temperature 1, accepted target
+        rows only), so drafting does not change the scores. Served on one GPU, as ``logprobs`` is."""
+
+        from tensorfold.engine.probabilities import Probabilities
+
+        prompt = [int(token) for token in prompt_ids]
+        labels = [int(token) for token in label_ids]
+        if not prompt:
+            raise ValueError("empty prompt")
+        if not labels:
+            raise ValueError("empty labels")
+        if not self.supports_logprobs:
+            raise ValueError("decision labels are scored on one GPU only")
+        record = Probabilities(0, len(prompt), 1, labels=labels)
+        self.generate(prompt, 1, None, lambda new: None, probabilities=record)
+        values = record.label_rows.get(len(prompt))
+        if values is None:
+            raise RuntimeError("the answer row was not collected")
+        return values, 0.0
+
     def generate(self, prompt: list[int], max_tokens: int, sampling,
                  on_tokens: Callable[[list[int]], bool | None], draft: bool = True, constraint=None,
                  stop_eos: bool = True, background: bool = False, probabilities=None, *, vision=None) -> dict[str, Any]:

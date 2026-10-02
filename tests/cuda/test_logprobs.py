@@ -127,3 +127,38 @@ def test_widest_probability_rows_bound_sorting_memory():
     assert transient < 256 * 1024**2
     assert len(probabilities.rows) == rows
     assert all(row == probabilities.rows[0] for row in probabilities.rows.values())
+
+
+@pytest.mark.parametrize("vocab", [31, 1025, 131073])
+def test_label_columns_match_reference_and_batching(vocab):
+    g = torch.Generator(device="cuda").manual_seed(23)
+    logits = torch.randn((5, vocab), generator=g, device="cuda", dtype=torch.float32).to(torch.bfloat16)
+    saved = logits.clone()
+    labels = [3, 0, vocab - 1, 17 % vocab]
+    together = Probabilities(0, 40, 5, labels=labels)
+    capture(logits, [1] * 5, list(range(40, 45)), together)
+    reference = logits.double().log_softmax(-1)
+    for i in range(5):
+        alone = Probabilities(0, 40 + i, 1, labels=labels)
+        capture(logits[i:i + 1], [1], [40 + i], alone)
+        assert alone.label_rows[40 + i] == together.label_rows[40 + i]
+        assert together.label_rows[40 + i] == pytest.approx([float(reference[i, c]) for c in labels], abs=3e-6)
+    assert torch.equal(logits, saved)
+    capture(logits[:1], [1], [45], together)                   # past the collected range: ignored
+    assert sorted(together.label_rows) == list(range(40, 45))
+
+
+def test_flashnext_label_rows_match_drafted_and_serial_prompts():
+    from test_flashnext_forward import _model
+    from tensorfold.families.qwen4_exp.cuda.decode import Engine, prefill
+
+    weights = _model()
+    prompt, labels = [5, 17, 99, 250, 7, 31], [65, 66, 67, 68]
+    rows = []
+    for drafted in (False, True):
+        engine = Engine(weights, capacity=512, max_rows=8, prefill_rows=64)
+        record = Probabilities(0, len(prompt), 1, labels=labels)
+        prefill(engine, prompt, None, mtp=drafted, probabilities=record)
+        rows.append(record.label_rows[len(prompt)])
+    assert rows[0] == rows[1]
+    assert all(value <= 0.0 for value in rows[0])
